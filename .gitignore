@@ -1,7 +1,7 @@
-agent_interaction/
 node_modules/
-
 .env
 dist/
 *.log
 .DS_Store
+agent_interaction/
+references/

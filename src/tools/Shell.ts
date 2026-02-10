@@ -26,6 +26,13 @@ export async function execute_command({ command }: ShellParams): Promise<{
     })
 
     const chunks: Buffer[] = []
+    let timedOut = false
+    const TIMEOUT_MS = 30000 // 30 seconds
+
+    const timer = setTimeout(() => {
+      timedOut = true
+      child.kill()
+    }, TIMEOUT_MS)
 
     child.stdout?.on('data', (d: Buffer) => {
       chunks.push(d)
@@ -36,6 +43,7 @@ export async function execute_command({ command }: ShellParams): Promise<{
     })
 
     child.on('error', (err) => {
+      clearTimeout(timer)
       const encoding = isWin ? 'cp936' : 'utf-8'
       chunks.push(Buffer.from(String(err), 'utf-8')) // err is usually JS string, safe to use utf-8 or default
       const output = iconv.decode(Buffer.concat(chunks), encoding)
@@ -43,8 +51,14 @@ export async function execute_command({ command }: ShellParams): Promise<{
     })
 
     child.on('close', (code) => {
+      clearTimeout(timer)
       const encoding = isWin ? 'cp936' : 'utf-8'
-      const output = iconv.decode(Buffer.concat(chunks), encoding)
+      let output = iconv.decode(Buffer.concat(chunks), encoding)
+      
+      if (timedOut) {
+        output += `\nError: Command timed out after ${TIMEOUT_MS / 1000} seconds`
+      }
+      
       resolve({ output, exitCode: code ?? 0 })
     })
   })
@@ -68,5 +82,5 @@ export function toSchema() {
         additionalProperties: false,
       },
     },
-  }
+  } as const
 }
