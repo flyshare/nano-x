@@ -3,17 +3,9 @@ import chalk from 'chalk'
 import * as fs from 'fs'
 import * as path from 'path'
 import { config } from '../config'
-import { execute_command, toSchema as shellToSchema } from '../tools/Shell'
-import { truncateOutput } from '../tools/Registry'
-import {
-  getFilesystemTools,
-  ls_tool,
-  read_file_tool,
-  write_file_tool,
-  edit_file_tool,
-  get_file_metadata_tool
-} from '../tools/Filesystem'
+import { ToolRegistry, truncateOutput } from '../tools/Registry'
 import { ChatCompletionMessageParam } from 'openai/resources/chat/completions'
+import { ContextBuilder } from '../context/ContextBuilder'
 
 const openai = new OpenAI({
   apiKey: config.openaiApiKey,
@@ -21,25 +13,8 @@ const openai = new OpenAI({
 })
 
 export function createAgentContext(): ChatCompletionMessageParam[] {
-  const systemPrompt = `You are a helpful assistant capable of executing shell commands and manipulating files.
-
-[Environment Info]
-OS: ${process.platform}
-Current Directory: ${process.cwd()}
-
-[Tool Usage Guidelines]
-- **File Operations**: You have dedicated tools for file manipulation (\`fs_ls\`, \`fs_read_file\`, \`fs_write_file\`, \`fs_edit_file\`).
-  - Use \`fs_ls\` to explore directories. It filters out node_modules/.git by default.
-  - Use \`fs_read_file\` to read files.
-    - **PROHIBITED**: You MUST NOT use \`type\`, \`cat\`, \`dir\` or pipes to read file content. Use \`fs_read_file\`.
-    - **Large Files**: If a file is large (>500 lines), you MUST specify a line range (startLine, endLine). The tool will reject requests without it.
-  - **Editing**: PREFER \`fs_edit_file\` over \`fs_write_file\` for small changes. This saves tokens and avoids rewriting entire files.
-  - Only use \`fs_write_file\` when creating new files or overwriting small files entirely.
-  - **Metadata**: Strictly prohibit guessing file size from directory listing. If you need file size, you MUST use the \`get_file_metadata\` tool.
-- **Shell**: Use \`shell_execute_command\` for general system tasks or when no specific tool is available.
-- **Optimization**: The system has a Token Guard that truncates output > 5000 characters. If you need to read a very large file, read it in chunks using line numbers.
-`
-
+  const builder = new ContextBuilder(process.cwd())
+  const systemPrompt = builder.buildSystemPrompt()
   return [{ role: 'system', content: systemPrompt }]
 }
 
@@ -66,11 +41,25 @@ export async function runAgent(
   }
 
   if (userPrompt) {
+    // Dynamic Skill Injection: Update System Prompt based on User Input
+    try {
+        const builder = new ContextBuilder(process.cwd());
+        const newSystemPrompt = builder.buildSystemPrompt(userPrompt);
+        
+        if (messages.length > 0 && messages[0].role === 'system') {
+            messages[0].content = newSystemPrompt;
+            // console.log(chalk.gray('[System Prompt Updated with Skills]'));
+        }
+    } catch (e) {
+        console.error("Failed to update system prompt:", e);
+    }
+
     console.log(chalk.blue('🚀 User:'), userPrompt)
     messages.push({ role: 'user', content: userPrompt })
   }
 
-  const tools = [shellToSchema(), ...getFilesystemTools()]
+  const registry = new ToolRegistry()
+  const tools = registry.getDefinitions()
   let iterations = 0
   const MAX_ITERATIONS = 10
 
@@ -116,21 +105,11 @@ export async function runAgent(
           let resultContent = ''
 
           try {
-            if (functionName === 'shell_execute_command') {
-              const { output, exitCode } = await execute_command(args)
-              resultContent = JSON.stringify({ exitCode, output })
-            } else if (functionName === 'fs_ls') {
-              resultContent = await ls_tool(args)
-            } else if (functionName === 'fs_read_file') {
-              resultContent = await read_file_tool(args)
-            } else if (functionName === 'fs_write_file') {
-              resultContent = await write_file_tool(args)
-            } else if (functionName === 'fs_edit_file') {
-              resultContent = await edit_file_tool(args)
-            } else if (functionName === 'get_file_metadata') {
-              resultContent = await get_file_metadata_tool(args)
+            const tool = registry.getTool(functionName)
+            if (tool) {
+              resultContent = await tool.execute(args)
             } else {
-              resultContent = 'Error: Unknown tool'
+              resultContent = `Error: Unknown tool '${functionName}'`
             }
           } catch (error) {
             resultContent = `Error executing ${functionName}: ${String(error)}`

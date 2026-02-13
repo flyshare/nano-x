@@ -1,72 +1,105 @@
 #!/usr/bin/env node
-import './setupEnv'
-import { program } from 'commander'
+import 'dotenv/config'
+import { Command } from 'commander'
+import * as path from 'path'
+import * as fs from 'fs'
 import chalk from 'chalk'
-import { z } from 'zod'
-import * as readline from 'readline/promises'
-import { stdin as input, stdout as output } from 'process'
+import { createAgentContext, runAgent } from './engine/AgentLoop'
+import { config, assertOpenAIConfig } from './config'
+import { ToolRegistry } from './tools/Registry'
+import { startInteractiveSession } from './session/index'
+import './tools/index' // Register tools
 
-import { config } from './config'
-import * as Engine from '@engine/index'
-import * as Tools from '@tools/index'
-import * as Session from '@session/index'
-import { runAgent, createAgentContext } from '@engine/AgentLoop'
+// Setup CLI
+const program = new Command()
 
 program
   .name('nano-x')
-  .description('Nano-X CLI')
-  .version('0.0.1')
+  .description('A minimal AI agent that can manipulate files and execute shell commands')
+  .version('1.0.0')
 
-// Validate Env
-const Schema = z.object({ NODE_ENV: z.string().optional() })
-const parsed = Schema.safeParse(process.env)
+function printBanner() {
+    console.clear()
+    
+    const logo = `
+ _   _    __   _   _    ___      __    __
+| \\ | |  / _ \\ | \\ | |  / _ \\    \\ \\  / /
+|  \\| | / /_\\ \\|  \\| | | | | |    \\ \\/ /
+| |\\  | |  _  || |\\  | | |_| |    / /\\ \\
+|_| \\_| |_| |_||_| \\_|  \\___/    /_/  \\_\\
+`
+    console.log(chalk.cyan(logo))
+    console.log(chalk.gray('v0.0.1 - AI Agent Framework'))
+    console.log('------------------------------------------------------------')
+    console.log(`OS: ${chalk.green(process.platform)}`)
+    console.log(`CWD: ${chalk.green(process.cwd())}`)
+    console.log(`Model: ${chalk.blue(config.openaiModel || 'unknown')}`)
+    console.log('------------------------------------------------------------')
+    console.log(chalk.yellow('Type "exit" or "quit" to leave.'))
+}
 
-async function main() {
-  // ASCII Art Banner
-  console.log(chalk.bold.cyan(`
-   _  _   __   _  _   __      __  __ 
-  ( \\( ) / _\\ ( \\( ) /  \\ ___ (  )/  )
-   )  ( /    \\ )  ( (  O )___  )  (  
-  (_)\\_)\\_/\\_/(_)\\_) \\__/     (__\\__) 
-  `))
-  console.log(chalk.gray(`  v0.0.1 - AI Agent Framework`))
-  console.log(chalk.gray('----------------------------------------'))
-  console.log(`OS: ${chalk.green(process.platform)} | CWD: ${chalk.green(process.cwd())}`)
-  console.log(`Model: ${chalk.cyan(config.openaiModel)}`)
-  console.log(chalk.gray('----------------------------------------'))
-  console.log(chalk.yellow('Type "exit" or "quit" to leave.'))
-  console.log()
-
-  const rl = readline.createInterface({ input, output })
-
-  // Initialize Context
-  let messages = createAgentContext()
-
-  // REPL Loop
-  while (true) {
-    const answer = await rl.question(chalk.green('nano-x > '))
-    const inputStr = answer.trim()
-
-    if (inputStr === 'exit' || inputStr === 'quit') {
-      console.log(chalk.cyan('Bye! 👋'))
-      rl.close()
-      process.exit(0)
-    }
-
-    if (!inputStr) continue
-
+program
+  .argument('[prompt]', 'The initial prompt for the agent')
+  .option('--subagent <instruction>', 'Run as a sub-agent with specific instruction')
+  .action(async (prompt, options) => {
     try {
-      // Pass the context to the agent
-      // The agent will append the user prompt, run the loop, and append the response/tool-results
-      messages = await runAgent(messages, inputStr)
-    } catch (error) {
-      console.error(chalk.red('Error during agent execution:'), error)
+      assertOpenAIConfig()
+    } catch (e) {
+      console.error(chalk.red(e))
+      process.exit(1)
     }
 
-    console.log() // spacer
-  }
-}
+    // Check if running as sub-agent
+    if (options.subagent) {
+        // Sub-agent mode: minimal UI, direct execution
+        const instruction = options.subagent
+        console.log(chalk.magenta(`[Sub-Agent] Initializing...`))
+        console.log(chalk.gray(`[Sub-Agent] Task: ${instruction}`))
+        
+        // Load tools
+        const registry = new ToolRegistry()
+        
+        // Execute task
+        try {
+            const messages = createAgentContext()
+            // Add a specific system message for sub-agent persona if needed?
+            // For now, standard context + user prompt is enough.
+            const result = await runAgent(messages, instruction)
+            console.log(chalk.green(`\n[Sub-Agent] Task Complete.`))
+            // We rely on runAgent or tools to output the final result.
+            // The process exit code 0 indicates success.
+            process.exit(0)
+        } catch (error) {
+            console.error(chalk.red(`[Sub-Agent] Error: ${error}`))
+            process.exit(1)
+        }
+        return
+    }
 
-if (require.main === module) {
-  main().catch(console.error)
-}
+    // Print Banner immediately
+    printBanner()
+
+    // Verify Tool Definitions Loading
+    const registry = new ToolRegistry()
+    const toolCount = registry.getDefinitions().length
+    // console.log(`Tool Definitions Loaded: ${toolCount}`) // Hidden to keep banner clean as per requirement? 
+    // Wait, requirement says "Print banner... then show prompt". 
+    // The previous log "Nano-x AI Agent Started..." should be removed/replaced by banner.
+    // The tool count check should probably be silent unless error.
+    
+    if (toolCount < 6) {
+        console.error(chalk.red(`CRITICAL ERROR: Only ${toolCount} tools loaded. Expected at least 6.`))
+    }
+
+    if (!prompt) {
+      // Interactive mode
+      await startInteractiveSession()
+    } else {
+      // Single run mode
+      const messages = createAgentContext()
+      await runAgent(messages, prompt)
+      console.log(chalk.cyan('Bye! 👋'))
+    }
+  })
+
+program.parse()

@@ -1,6 +1,7 @@
 import { exec } from 'node:child_process'
 import { z } from 'zod'
 import * as iconv from 'iconv-lite'
+import { BaseTool } from './Tool'
 
 export const ShellParamsSchema = z.object({
   command: z.string().min(1),
@@ -12,6 +13,14 @@ export async function execute_command({ command }: ShellParams): Promise<{
   output: string
   exitCode: number
 }> {
+  // Physical Safety: Intercept smart_edit attempts in shell
+  if (command.includes('smart_edit')) {
+    return {
+      output: 'Error: Do not call smart_edit via shell. Use the native smart_edit tool function directly.',
+      exitCode: 1
+    }
+  }
+
   return new Promise((resolve) => {
     // On Windows, defaults to GBK (cp936), so we use iconv to decode.
     // We do NOT use 'chcp 65001' because it fails to affect cmd.exe's own error messages (stderr),
@@ -62,6 +71,17 @@ export async function execute_command({ command }: ShellParams): Promise<{
       resolve({ output, exitCode: code ?? 0 })
     })
   })
+}
+
+export class ShellExecuteTool extends BaseTool {
+  name = 'shell_execute_command'
+  description = 'Execute a shell command and return combined stdout+stderr output.'
+  schema = ShellParamsSchema
+
+  async execute(args: ShellParams): Promise<string> {
+    const { output, exitCode } = await execute_command(args)
+    return JSON.stringify({ exitCode, output })
+  }
 }
 
 export function toSchema() {

@@ -21,15 +21,67 @@ export const WriteFileSchema = z.object({
   content: z.string().describe('The content to write'),
 })
 
-export const EditFileSchema = z.object({
+export const SmartEditSchema = z.object({
   path: z.string().describe('The file path to edit'),
-  oldText: z.string().describe('The exact text to replace'),
-  newText: z.string().describe('The new text'),
+  findText: z.string().describe('The precise code block to replace'),
+  replaceText: z.string().describe('The new code block'),
 })
 
 export const GetFileMetadataSchema = z.object({
   path: z.string().describe('The file or directory path'),
 })
+
+import { BaseTool } from './Tool'
+
+export class SmartEditTool extends BaseTool {
+  name = 'smart_edit'
+  description = 'Precisely replace a code block in a file. Checks for uniqueness and handles line endings automatically.'
+  schema = SmartEditSchema
+
+  async execute(args: z.infer<typeof SmartEditSchema>): Promise<string> {
+    return smart_edit_tool(args)
+  }
+}
+
+export class LsTool extends BaseTool {
+  name = 'fs_ls'
+  description = 'List files in a directory. Ignores node_modules, .git, etc.'
+  schema = LsSchema
+
+  async execute(args: z.infer<typeof LsSchema>): Promise<string> {
+    return ls_tool(args)
+  }
+}
+
+export class ReadFileTool extends BaseTool {
+  name = 'fs_read_file'
+  description = 'Read file content. For large files (>500 lines), defaults to first 100 lines unless range specified.'
+  schema = ReadFileSchema
+
+  async execute(args: z.infer<typeof ReadFileSchema>): Promise<string> {
+    return read_file_tool(args)
+  }
+}
+
+export class WriteFileTool extends BaseTool {
+  name = 'fs_write_file'
+  description = 'Write content to a file (overwrites). Creates directories automatically.'
+  schema = WriteFileSchema
+
+  async execute(args: z.infer<typeof WriteFileSchema>): Promise<string> {
+    return write_file_tool(args)
+  }
+}
+
+export class GetFileMetadataTool extends BaseTool {
+  name = 'get_file_metadata'
+  description = 'Get file metadata (size, lastModified, etc.). USE THIS instead of guessing size from ls.'
+  schema = GetFileMetadataSchema
+
+  async execute(args: z.infer<typeof GetFileMetadataSchema>): Promise<string> {
+    return get_file_metadata_tool(args)
+  }
+}
 
 // --- Implementations ---
 
@@ -133,23 +185,47 @@ export async function write_file_tool(args: z.infer<typeof WriteFileSchema>) {
   }
 }
 
-export async function edit_file_tool(args: z.infer<typeof EditFileSchema>) {
+export async function smart_edit_tool(args: z.infer<typeof SmartEditSchema>) {
   const targetPath = path.resolve(process.cwd(), args.path)
 
   try {
     const content = await fs.readFile(targetPath, { encoding: 'utf-8' })
 
-    if (!content.includes(args.oldText)) {
-      return `Error: oldText not found in file. Please ensure exact match (including whitespace).`
+    // Normalize content and findText to LF (\n) for comparison
+    const normalizedContent = content.replace(/\r\n/g, '\n')
+    const normalizedFind = args.findText.replace(/\r\n/g, '\n')
+
+    // Uniqueness Check
+    // We use a simple count logic on the normalized content
+    // Note: This naive split approach works for most cases where findText is not empty
+    const parts = normalizedContent.split(normalizedFind)
+    const matches = parts.length - 1
+
+    if (matches === 0) {
+      return `Error: findText not found in file. Please ensure indentation, spaces, and content match exactly.`
     }
 
-    // Safety check for multiple occurrences could be added here, 
-    // but requirement said "simple string replacement".
-    // We will replace only the first occurrence to be safe-ish.
-    const newContent = content.replace(args.oldText, args.newText)
+    if (matches > 1) {
+      return `Error: findText matches ${matches} occurrences. Please provide more context (surrounding lines) to make it unique.`
+    }
 
-    await fs.writeFile(targetPath, newContent, { encoding: 'utf-8' })
-    return `File edited successfully.`
+    // If exactly one match, we proceed with replacement.
+    // Strategy: Replace in the normalized content, then restore line endings if needed.
+    // Wait, replacing in normalized content is easier, but we need to know if we should write back LF or CRLF.
+    // Let's detect the dominant line ending of the original file.
+    const isCRLF = content.includes('\r\n')
+
+    const normalizedReplace = args.replaceText.replace(/\r\n/g, '\n')
+    const newNormalizedContent = normalizedContent.replace(normalizedFind, normalizedReplace)
+
+    // Restore line endings if original was CRLF
+    const finalContent = isCRLF
+      ? newNormalizedContent.replace(/\n/g, '\r\n')
+      : newNormalizedContent
+
+    await fs.writeFile(targetPath, finalContent, { encoding: 'utf-8' })
+    return `Successfully edited '${args.path}'`
+
   } catch (error) {
     return `Error editing file: ${error}`
   }
@@ -224,16 +300,16 @@ export function getFilesystemTools() {
     {
       type: 'function',
       function: {
-        name: 'fs_edit_file',
-        description: 'Replace text in a file. Use this for small changes to avoid rewriting large files.',
+        name: 'smart_edit',
+        description: 'Precisely replace a code block in a file. Checks for uniqueness and handles line endings automatically.',
         parameters: {
           type: 'object',
           properties: {
             path: { type: 'string', description: 'File path' },
-            oldText: { type: 'string', description: 'Text to replace' },
-            newText: { type: 'string', description: 'Replacement text' },
+            findText: { type: 'string', description: 'The exact code block to replace (must be unique)' },
+            replaceText: { type: 'string', description: 'The new code block' },
           },
-          required: ['path', 'oldText', 'newText'],
+          required: ['path', 'findText', 'replaceText'],
         },
       },
     },
